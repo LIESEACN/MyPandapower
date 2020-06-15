@@ -2,7 +2,6 @@ import pandapower as pd
 import pandapower.networks as pn
 
 
-# cd D:\OneDrive\桌面\研究生\项目\项目#2 嘉兴供电局 灵活性\资料\code
 '''
 net = pd.converter.from_mpc('caset.mat',
                             f_hz=50,
