@@ -1,126 +1,205 @@
-# 建立case
-# 初始修改
+'''
+@Liesea CN
+A modified case for test based on PandaPower
+'''
 
-import pandapower as pd
+import pandapower.networks as pn
 import numpy as np
+import Data
+import pandapower as pp
+import pandas as pd
 
 
-def LoadCase(path):
-    # path 修改好算例的case路径
-    net = pd.converter.from_mpc(r'path', f_hz=50, casename_mpc_file='caset')
-    return net
+def InitialCase():
+    '''
+    return: pandapower net
+    '''
+    # Reference Case Based on Case24
+    net = pn.case24_ieee_rts()
 
-
-def ModifyCase(net):
-    # 输入网络结构net
-    # 风机位置 16 18 节点 index [5,6]
-    # 加入直流部分
-    net.load['controllable'] = True
-    pd.replace_ext_grid_by_gen(net)
-    pd.replace_sgen_by_gen(net)
+    # replace
+    pp.replace_ext_grid_by_gen(net)
+    pp.replace_sgen_by_gen(net)
+    # sort the gen
+    net.gen = net.gen.sort_values(by=['bus', 'max_p_mw'])
+    idx = net.poly_cost.index.to_list()   # idx after sorting
+    element = net.poly_cost['element'].to_list()
     net.gen.loc[0, 'slack'] = True
-    pd.create_bus(net,
+
+    # modify Gen Parameter according bus order
+    for i in range(net.gen.shape[0]):
+        net.gen.iloc[i, 10] = Data.PMAX[i]
+        net.gen.iloc[i, 11] = Data.PMIN[i]
+        net.gen.iloc[i, 12] = Data.QMAX[i]
+        net.gen.iloc[i, 13] = Data.QMIN[i]
+
+    # adding a bus for DC line
+    pp.create_bus(net,
                   vn_kv=230,
                   name='DCnode',
                   index=24,
                   max_vm_pu=1.05,
                   min_vm_pu=0.95)
-    pd.create_ext_grid(net,
+    # adding a ext_grid as DC power
+    pp.create_ext_grid(net,
                        bus=24,
-                       max_q_mvar=500,
+                       vm_pu=1.05,
+                       max_q_mvar=10,
                        min_q_mvar=0,
                        min_p_mw=0,
                        max_p_mw=1000,
                        slack=False)
-    pd.create_poly_cost(net,
+    # adding cost of ext_grid
+    pp.create_poly_cost(net,
                         element=0,
-                        et='gen',
+                        et='ext_grid',
                         cp0_eur=0,
                         cp1_eur_per_mw=0,
                         cp2_eur_per_mw2=0)
-    pd.create_dcline(net,
+
+    # adding DC line
+    pp.create_dcline(net,
                      from_bus=24,
-                     to_bus=17,
-                     p_mw=400,
-                     loss_mw=10,
+                     to_bus=16,
+                     p_mw=0,
+                     loss_mw=5,
                      loss_percent=5,
                      vm_from_pu=1.05,
                      vm_to_pu=0.95,
                      name='DC1',
-                     max_p_mw=1000,
-                     max_q_from_mvar=500,
-                     min_q_from_mvar=-500,
-                     max_q_to_mvar=500,
-                     min_q_to_mvar=-500)
+                     max_p_mw=400,
+                     max_q_from_mvar=0,
+                     min_q_from_mvar=0,
+                     max_q_to_mvar=0,
+                     min_q_to_mvar=0)
+
+    # load
+    net.load['controllable'] = True
+    # load-sheeding cost and load constraints
+    for i in range(net.load.shape[0]):
+        net.load.loc[i, 'max_p_mw'] = net.load.loc[i, 'p_mw']
+        net.load.loc[i, 'min_p_mw'] = 0
+        net.load.loc[i, 'max_q_mvar'] = net.load.loc[i, 'q_mvar']
+        net.load.loc[i, 'min_q_mvar'] = 0
+        pp.create_poly_cost(net, i, et='load', cp1_eur_per_mw=-500)
+
+    return net, idx, element
+
+
+def WindPower(ppnet, WindNode, WindPower):
+    '''
+    风电出力生成
+    '''
+    def GenerateWind(WindSpeed, WindPowerMax):
+        '''
+        风速生成风力
+        '''
+        Vin = 3
+        Vr = 13.5
+        Vout = 20
+        if (WindSpeed <= Vin) and (WindSpeed > Vout):
+            return 0
+        elif (WindSpeed > Vin) and (WindSpeed <= Vr):
+            return WindPowerMax / (Vr-Vin) * WindSpeed - Vin*WindPowerMax/(Vr-Vin)
+        elif (WindSpeed > Vr) and (WindSpeed <= Vout):
+            return WindPowerMax
+
+    Nw = len(WindNode)
+    # index to element
+    for i in range(Nw):
+        c = 7
+        k = 2
+        # I = np.where(element == WindNode[i])[0].tolist()
+        WindSpeed = c * (-np.log(np.random.rand())) ** (1/k)
+        WP = GenerateWind(WindSpeed, WindPower[i])
+        ppnet.gen.loc[WindNode[i], 'max_p_mw'] = WP
+        ppnet.gen.loc[WindNode[i], 'max_q_mvar'] = WP
+        ppnet.gen.loc[WindNode[i], 'min_p_mw'] = 0
+        ppnet.gen.loc[WindNode[i], 'min_q_mvar'] = 0
+
+    return ppnet
+
+
+def ModifyWindCost(net, element, WindNode):
+    '''
+    找到风机cost位置，修改成本 loc[index]
+    '''
+    Nw = len(WindNode)
+    for i in range(Nw):
+        idx = np.where(element == WindNode[i])[0].tolist()
+        net.poly_cost.loc[idx, 'cp0_eur'] = 0
+        net.poly_cost.loc[idx, 'cp1_eur_per_mw'] = 0
+        net.poly_cost.loc[idx, 'cp2_eur_per_mw2'] = 0
     return net
 
 
-def StateOfGen(net, Param_Relia, R):
-    # 机组运行可靠性
-    # Param_Relia numpy n x 2
-    # don't include dc gen
-    for i in range(len(R)):
-        if R[i] < Param_Relia[i, 0]:
-            net.gen.loc[i, 'in_service'] = False
-    # 找到slack机组
-    if net.gen.loc[0, 'in_service'] is True:
-        return net
+def AddingUnit(net, GEN, COST):
+    '''
+    增加机组
+    '''
+    ng = net.gen.shape[0]
+    ang = len(GEN)
+    for i in range(ang):
+        # 增加机组
+        pp.create_gen(net,
+                      bus=GEN[i][0],
+                      p_mw=GEN[i][1],
+                      vm_pu=1,
+                      index=ng + i,
+                      max_q_mvar=GEN[i][3],
+                      min_q_mvar=GEN[i][4],
+                      max_p_mw=GEN[i][8],
+                      min_p_mw=GEN[i][9])
+        # 增加成本
+        pp.create_poly_cost(net,
+                            element=ng + i,
+                            et='gen',
+                            cp2_eur_per_mw2=COST[i][4],
+                            cp1_eur_per_mw=COST[i][5],
+                            cp0_eur=COST[i][6])
+    return net
+
+
+def GenStatus(net, Relia):
+    '''
+    机组可靠性参数
+    '''
+    Ng = Relia.shape[0]
+    for i in range(Ng):
+        if np.random.rand() < Relia[i][1]:
+            net.gen.iloc[i, 2] = False
+    if net.gen.loc[0, 'in_service'] == False:
+        # 重新找一个松弛节点
+        x = np.where(net.gen['in_service'] == True)[0].tolist()
+        x = x[0]
+        net.gen.iloc[x, 9] = True
+        net.gen.loc[0, 'slack'] = False
+    return net
+
+
+def DCStatus(net, Relia, DCPOWER):
+    '''
+    直流可靠性参数
+    '''
+    x = np.random.rand()
+    if x < Relia[0]:
+        DCPOWER = DCPOWER * 0
+    elif x >= Relia[0] and x < Relia[1]:
+        DCPOWER = DCPOWER * 0.2
+    elif x >= Relia[1] and x < Relia[2]:
+        DCPOWER = DCPOWER * 0.4
+    elif x >= Relia[2] and x < Relia[3]:
+        DCPOWER = DCPOWER * 0.6
     else:
-        x = np.array(np.where(net.gen.loc[:, 'slack'] is False))
-        s = x[0, 0]
-        net.gen.loc[s, 'slack'] = True
-        return net
-
-
-def WindPower(net, WP, wind):
-    # 修改风机的出力参数
-    P = np.zeros([1, len(WP)])
-    Vin = 3
-    Vr = 13.5
-    Vout = 20
-    for i in range(len(WP)):
-        if (WP <= Vin) | (WP > Vout):
-            P[0, i] = 0
-        elif (WP > Vin) & (WP <= Vr):
-            P[0, i] = wind / (Vr-Vin) * WP - Vin*150/(Vr-Vin)
-        elif (WP > Vr) & (WP <= Vout):
-            P[0, i] = wind
-    net.gen.loc[5, 'max_p_mw'] = P[0, 0]
-    net.gen.loc[6, 'max_p_mw'] = P[0, 1]
-    net.gen.loc[5, 'min_p_mw'] = 0
-    net.gen.loc[6, 'min_p_mw'] = 0
-    net.gen.loc[5, 'max_q_mvar'] = P[0, 0]
-    net.gen.loc[6, 'max_q_mvar'] = P[0, 1]
-    net.gen.loc[5, 'min_q_mvar'] = 0
-    net.gen.loc[6, 'min_q_mvar'] = 0
+        DCPOWER = DCPOWER
+    net.dcline.loc[0, 'max_p_mw'] = DCPOWER
     return net
 
 
-def StateOfDC(net, Param_Relia, R, DCPOWER):
-    # 直流系统的可靠性
-    # 直流 400/8000
-    if R <= Param_Relia[0, 0]:
-        net.dcline.loc[0, 'in_service'] = False
-    elif R > Param_Relia[0, 0] & R <= Param_Relia[0, 1]:
-        net.dcline.loc[0, 'max_p_mw'] = DCPOWER*0.2
-        net.dcline.loc[0, 'max_q_from_mvar'] = DCPOWER*0.2
-        net.dcline.loc[0, 'min_q_from_mvar'] = -DCPOWER*0.2
-        net.dcline.loc[0, 'max_q_to_mvar'] = DCPOWER*0.2
-        net.dcline.loc[0, 'min_q_to_mvar'] = -DCPOWER*0.2
-    elif R > Param_Relia[0, 1] & R <= Param_Relia[0, 2]:
-        net.dcline.loc[0, 'max_p_mw'] = DCPOWER*0.5
-        net.dcline.loc[0, 'max_q_from_mvar'] = DCPOWER*0.5
-        net.dcline.loc[0, 'min_q_from_mvar'] = -DCPOWER*0.5
-        net.dcline.loc[0, 'max_q_to_mvar'] = DCPOWER*0.5
-        net.dcline.loc[0, 'min_q_to_mvar'] = -DCPOWER*0.5
-    else:
-        net.dcline.loc[0, 'max_p_mw'] = DCPOWER
-        net.dcline.loc[0, 'max_q_from_mvar'] = DCPOWER
-        net.dcline.loc[0, 'min_q_from_mvar'] = -DCPOWER
-        net.dcline.loc[0, 'max_q_to_mvar'] = DCPOWER
-        net.dcline.loc[0, 'min_q_to_mvar'] = -DCPOWER
-    return net
-
-
-if __name__ == "__main__":
-    pass
+def SavingResult(path, Data):
+    Data = np.array(Data)
+    Data = pd.DataFrame(Data)
+    writer = pd.ExcelWriter(path)
+    Data.to_excel(writer)
+    writer.save()
+    writer.close()
